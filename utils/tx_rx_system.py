@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import subprocess
+import matplotlib.pyplot as plt
 
 def executar_comanda(comanda):
     """Funció aux per cridar scripts"""
@@ -327,18 +328,106 @@ def convertir_senyal_osciloscopi_bin(senyal_csv=None, senyal_neta_csv=None, chan
     else:
         raise ValueError("channels ha de ser 1 o 2")
 
-def main():
-    print("========================================")
-    print("   SCRIPT PROVA    ")
-    print("========================================")
-    opcio = input("(C)odificar o (D)ecodificar?: ").strip().lower()
+def generate_prbs_4096(n_bits: int, seed: int = 0xACE1):
 
-    if opcio == 'c':
-        codificar()
-    elif opcio == 'd':
-        decodificar()
-    else:
-        print("Opció no vàlida.")
+    N_TOTAL = 4096
 
-if __name__ == "__main__":
-    main()
+    if N_TOTAL % n_bits != 0:
+        raise ValueError(
+            f"n_bits = {n_bits} must divide 4096 exactly "
+            f"(valid: { [d for d in range(1, 4097) if 4096 % d == 0] })"
+        )
+
+    samples_per_bit = N_TOTAL // n_bits
+    bits = []
+    lfsr = seed & 0xFFFF
+
+    for _ in range(n_bits):
+        bit = lfsr & 1
+        bits.append(bit)
+
+        feedback = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1
+        lfsr = ((lfsr >> 1) | (feedback << 15)) & 0xFFFF
+
+    print(f"Generated PRBS bits: {bits}")
+    signal = np.repeat(bits, samples_per_bit).astype(float)
+    signal = signal[:N_TOTAL]
+
+    nom_csv = "fitxers/prbs.csv"
+    np.savetxt(nom_csv, signal, delimiter=',', fmt='%.2f')
+
+    print(f"Samples per bit: {samples_per_bit}")
+    print(f"Saved signal to {nom_csv}")
+
+    executar_comanda(f"python3 utils/csv2arb.py {nom_csv}")
+
+def experiment1_bode(signals, freqs, resistencia, fs_list):
+
+    max_currents = []
+
+    fig, axes = plt.subplots(
+        nrows=len(signals),
+        ncols=2,
+        figsize=(14, len(signals) * 2)
+    )
+
+    if len(signals) == 1:
+        axes = np.array([axes])
+
+    for i, (signal, freq, fs) in enumerate(
+        zip(signals, freqs, fs_list)
+    ):
+
+        v_mesurada = np.loadtxt(
+            f"fitxers/BW/{signal}_neta.csv",
+            delimiter=','
+        )
+
+        signal_Id = ((5 - v_mesurada) / resistencia) * 1000  # mA
+        N = len(signal_Id)
+
+        # -----------------------
+        # Time domain
+        # -----------------------
+        ax_t = axes[i, 0]
+        ax_t.plot(signal_Id, color='blue', linewidth=1)
+        ax_t.set_title(f"{signal} — temps")
+        ax_t.set_ylabel("Id (mA)")
+        ax_t.grid(True, alpha=0.3)
+
+        # -----------------------
+        # FFT
+        # -----------------------
+        ax_f = axes[i, 1]
+
+        spectrum = np.abs(np.fft.rfft(signal_Id))
+        freqs_fft = np.fft.rfftfreq(N, d=1/fs)
+        amplitude = 2 * spectrum / N
+
+        idx_fund = np.argmin(np.abs(freqs_fft - freq))
+        valor_estable = amplitude[idx_fund]
+
+        max_currents.append(valor_estable)
+
+        ax_f.plot(freqs_fft / 1e3, amplitude, color='purple', linewidth=1)
+        ax_f.set_title(f"{signal} — FFT")
+        ax_f.set_xlabel("Freqüència (kHz)")
+        ax_f.set_ylabel("Amplitud (mA)")
+        ax_f.set_xlim(
+            0,
+            min(freqs_fft[-1] / 1e3, freq * 10 / 1e3)
+        )
+        ax_f.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fig.suptitle(
+        "Corrent Id — domini temporal i freqüencial",
+        fontsize=16,
+        y=1.02
+    )
+    plt.show()
+
+    return max_currents
+
+def experiment2_BERvsBitrate(signals, bit_rates, sampling_rate):
+    return
