@@ -130,14 +130,14 @@ def process_dataset(freqs, sampling_rates, senyals, folder, resistencia, time_to
         # Time domain plot
         t = np.arange(len(i_out)) / fs * 1e6
 
-        cycles_to_show = 3
-        time_to_show = min(cycles_to_show / target_f * 1e6, 50)  # in µs, max 50 µs
 
-        t_to_show = t[t <= time_to_show]
-        signal_to_show = i_out[t <= time_to_show]
+        cycles_to_show = 10
+        samples_to_show = min(int(cycles_to_show * fs / target_f), len(i_out))
+        signal_to_show = i_out[:samples_to_show]
+        t_to_show      = t[:samples_to_show]
 
         ax_t = axes_time[idx]
-        ax_t.plot(t, i_out, linewidth=0.8, color="tab:green", label="I (mA)")
+        ax_t.plot(t_to_show, signal_to_show, linewidth=0.8, color="tab:green", label="I (mA)")
         ax_t.set_ylabel("Current (mA)", fontsize=8)
         ax_t.set_title(f"Senyal {senyal.upper()} — {fmt_freq(target_f)}", fontsize=10)
         ax_t.set_xlabel("Time (us)", fontsize=8)
