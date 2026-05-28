@@ -43,6 +43,8 @@ def extract_fundamental_amplitude(y, fs, target_freq):
         # Fallback to nearest bin if window contains no bins
         peak_idx = np.argmin(np.abs(freqs_fft - target_freq))
 
+    spectrum_mag = spectrum_mag * (4.0 / len(y))  # Hanning window normalization factor
+
     return spectrum_mag[peak_idx], freqs_fft[peak_idx], freqs_fft, spectrum_mag
 
 
@@ -80,6 +82,35 @@ def find_bandpass_cutoffs(freqs, gains_db):
             upper_cutoff = 10**log_fc
 
     return lower_cutoff, upper_cutoff
+
+
+def smooth_temporal_signal(data, sampling_rate, target_freq, smoothness_factor=0.02):
+    """
+    Smooths high-frequency ripple from a time-domain signal using a moving average window.
+
+    Parameters:
+    - data: 1D numpy array of your signal
+    - sampling_rate: The sampling rate of the file (Hz)
+    - target_freq: The square wave frequency of the file (Hz)
+    - smoothness_factor: Percentage of one signal cycle to use as the window size.
+                         Keep this small (0.01 to 0.05) for square waves to avoid
+                         rounding the sharp switching edges.
+    """
+    # Calculate how many data points make up a single full cycle of your wave
+    points_per_cycle = sampling_rate / target_freq
+
+    # Define the window size as a fraction of that cycle
+    window_size = int(points_per_cycle * smoothness_factor)
+    if window_size < 3:
+        window_size = 3  # Minimum window size
+    if window_size % 2 == 0:
+        window_size += 1  # Ensure the window is odd to maintain alignment
+
+    # Apply a uniform boxcar window convolution
+    window = np.ones(window_size) / window_size
+    smoothed_data = np.convolve(data, window, mode="same")
+
+    return smoothed_data
 
 
 # ==============================================================================
@@ -172,32 +203,42 @@ for idx, senyal in enumerate(senyals):
     v_in = np.loadtxt(f"test/BW_TX/{senyal}_neta_tx.csv", delimiter=",")
     v_mesurada = np.loadtxt(f"test/BW_TX/{senyal}_neta_rx.csv", delimiter=",")
 
-    # Calculate Current (mA)
-    signal_Id = ((v_in - v_mesurada) / resistencia) * 1000
+    # Calculate Output Current (mA)
+    i_out = ((v_in - v_mesurada) / resistencia) * 1000
+
+    # Smooth out high-frequency ripple (no effect on the fundamental frequency)
+    i_out = smooth_temporal_signal(i_out, sampling_rates[idx], target_f, smoothness_factor=0.035)
 
     # Peak detection in the frequency domain
-    amp_in, freq_in, freqs_fft_in, spec_in = extract_fundamental_amplitude(v_in, sampling_rates[idx], target_f)
-    amp_out, freq_out, freqs_fft_out, spec_out = extract_fundamental_amplitude(signal_Id, sampling_rates[idx], target_f)
+    amp_out, freq_out, freqs_fft_out, spec_out = extract_fundamental_amplitude(i_out, sampling_rates[idx], target_f)
+    # [!] V_in should be V_gate, not V_cc. But we have only 2 channels in the oscilloscope. Removing this for now.
+    # amp_in, freq_in, freqs_fft_in, spec_in = extract_fundamental_amplitude(v_in, sampling_rates[idx], target_f)
 
-    # The frequency resolution (spacing between discrete frequency steps in your FFT)
-    freq_resolution = sampling_rates[idx] / len(v_in) / 1e3  # kHz
+    # The frequency resolution (spacing between discrete frequency steps in FFT)
+    freq_res = sampling_rates[idx] / len(v_in) / 1e3  # kHz
 
     # Calculate error percentages
-    err_in = abs(freq_in - target_f) / target_f
     err_out = abs(freq_out - target_f) / target_f
-    if err_in > 0.02 or err_out > 0.02:
-        print(
-            f"Frequency mismatch! Target: {target_f} Hz | Found V_in: {freq_in:.0f} Hz, I_out: {freq_out:.0f} Hz, [!] Resolution: {freq_resolution:.0f} kHz"
-        )
+    if err_out > 0.02:
+        print(f"Freq mismatch! Target: {target_f/1e3} kHz | I_out: {freq_out} Hz | Resolution: {freq_res} kHz")
 
-    # Gain: how effectively a voltage ripple or modulation on the V_CC line translates into an AC current ripple through the LEDs at a given frequency f.
-    gain = amp_out / amp_in if amp_in > 0 else 0
+    # # Old Gain: how effectively a modulation on the V_gate line translates into an AC current through the LED at a given frequency f.
+    # gain = amp_out / amp_in if amp_in > 0 else 0
+    # If no V_gate is available, Gain is simply the raw amplitude of output current
+    gain = amp_out
+
     system_gains.append(gain)
+    print(f"Gain: {gain}")
 
     # --- TIME DOMAIN PLOTS ---
-    t = np.arange(len(signal_Id)) / sampling_rates[idx] * 1e6
+    t = np.arange(len(i_out)) / sampling_rates[idx] * 1e6  # us
+
+    time_to_show = 10  # us
+    t_to_show = t[t <= time_to_show]
+    signal_to_show = i_out[t <= time_to_show]
+
     ax_t = axes_time[idx]
-    ax_t.plot(t[:500], signal_Id[:500], linewidth=0.8, color="tab:green", label="I (mA)")
+    ax_t.plot(t_to_show, signal_to_show, linewidth=0.8, color="tab:green", label="I (mA)")
     ax_t.set_ylabel("Current (mA)", fontsize=8)
     ax_t.set_title(f"Senyal {senyal.upper()} — {target_f/1e3:.0f} kHz", fontsize=10)
     ax_t.set_xlabel("Time (us)", fontsize=8)
@@ -205,26 +246,36 @@ for idx, senyal in enumerate(senyals):
     ax_t.tick_params(labelsize=7)
     ax_t.grid(True, alpha=0.3)
 
+    # # Alternatively plot V_in and V_mesurada
+    # ax_t.plot(t[:500], v_in[:500], linewidth=0.8, color="tab:blue", label="V_in")
+    # ax_t.plot(t[:500], v_mesurada[:500], linewidth=0.8, color="tab:red", label="V_mesurada")
+    # ax_t.set_ylabel("Voltage (V)", fontsize=8)
+    # ax_t.set_title(f"Senyal {senyal.upper()} — {target_f/1e3:.0f} kHz", fontsize=10)
+    # ax_t.set_xlabel("Time (us)", fontsize=8)
+    # ax_t.legend(fontsize=7, loc="upper right")
+    # ax_t.tick_params(labelsize=7)
+    # ax_t.grid(True, alpha=0.3)
+
     # --- FFT PLOTS ---
     ax_f = axes_fft[idx]
     # Normalize spectra just for visual comparison
-    spec_in_norm = spec_in / np.max(spec_in) if np.max(spec_in) > 0 else spec_in
+    # spec_in_norm = spec_in / np.max(spec_in) if np.max(spec_in) > 0 else spec_in
     spec_out_norm = spec_out / np.max(spec_out) if np.max(spec_out) > 0 else spec_out
 
-    ax_f.plot(freqs_fft_in, spec_in_norm, color="tab:blue", alpha=0.7, label="V_in Spectrum")
+    # ax_f.plot(freqs_fft_in, spec_in_norm, color="tab:blue", alpha=0.7, label="V_in Spectrum")
     ax_f.plot(freqs_fft_out, spec_out_norm, color="tab:green", alpha=0.7, label="I_out Spectrum")
 
     # Target Frequency Line
     ax_f.axvline(target_f, color="black", linestyle="--", label="Target Freq")
 
     # Mark found peaks
-    ax_f.plot(freq_in, spec_in_norm[np.where(freqs_fft_in == freq_in)[0][0]], "ro", markersize=6, label="Peak Found")
+    # ax_f.plot(freq_in, spec_in_norm[np.where(freqs_fft_in == freq_in)[0][0]], "ro", markersize=6, label="Peak Found")
     ax_f.plot(freq_out, spec_out_norm[np.where(freqs_fft_out == freq_out)[0][0]], "ro", markersize=6)
 
     # Zoom in around the target frequency
     ax_f.set_xlim(target_f * 0.5, target_f * 1.5)
     ax_f.set_title(
-        f"FFT Peak Match: {senyal.upper()} (Target: {target_f/1e3:.0f} kHz, Resolution: {freq_resolution:.0f} kHz)",
+        f"FFT Peak Match: {senyal.upper()} (Target: {target_f/1e3:.0f} kHz, Resolution: {freq_res:.0f} kHz)",
         fontsize=10,
     )
     ax_f.set_xlabel("Frequency (Hz)", fontsize=8)
@@ -237,7 +288,7 @@ for i in range(len(senyals), len(axes_time)):
     axes_fft[i].set_visible(False)
 
 # Save Time Domain Plot
-fig_time.suptitle("Corrent I per cada senyal", fontsize=14, y=1.01)
+fig_time.suptitle(f"Corrent I_out per cada senyal - Plots tallats a {time_to_show:.0f} us", fontsize=14, y=1.01)
 fig_time.tight_layout()
 fig_time.savefig("test/test.png", dpi=150, bbox_inches="tight")
 plt.close(fig_time)
