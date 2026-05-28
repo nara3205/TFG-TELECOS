@@ -80,7 +80,7 @@ def send_bit(bit):
 
 def send_frame(bpm):
 	data = format(bpm, '08b')
-	start = "101010"
+	start = "10101010"
 	preamble = format(len(data), '08b')
 	frame = start + preamble + data
 	print("FRAME:", frame)
