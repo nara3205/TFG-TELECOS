@@ -313,71 +313,221 @@ def convertir_senyal_osciloscopi_bin(senyal_csv=None, senyal_neta_csv=None, chan
     else:
         raise ValueError("channels ha de ser 1 o 2")
 
-def generate_prbs_4096(n_bits: int, seed: int = 0xACE1):
+def generate_prbs_4096(seed: int = 42) -> np.ndarray:
 
     N_TOTAL = 4096
 
-    if N_TOTAL % n_bits != 0:
-        raise ValueError(
-            f"n_bits = {n_bits} must divide 4096 exactly "
-            f"(valid: { [d for d in range(1, 4097) if 4096 % d == 0] })"
-        )
-
-    samples_per_bit = N_TOTAL // n_bits
-    bits = []
-    lfsr = seed & 0xFFFF
-
-    for _ in range(n_bits):
-        bit = lfsr & 1
-        bits.append(bit)
-        feedback = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1
-        lfsr = ((lfsr >> 1) | (feedback << 15)) & 0xFFFF
-
-    print(f"Generated PRBS bits: {bits}")
-    signal = np.repeat(bits, samples_per_bit).astype(float)
-    signal = signal[:N_TOTAL]
+    rng = np.random.default_rng(seed=seed)
+    bits = rng.integers(0, 2, size=N_TOTAL, dtype=np.uint8)
+    
 
     nom_csv = "fitxers/prbs.csv"
-    np.savetxt(nom_csv, signal, delimiter=',', fmt='%.2f')
-    print(f"Samples per bit: {samples_per_bit}")
+    np.savetxt(nom_csv, bits, delimiter=',', fmt='%.2f')
     print(f"Saved signal to {nom_csv}")
     executar_comanda(f"python3 utils/csv2arb.py {nom_csv}")
 
-def experiment1_BODE(senyals, signal_Ids, sampling_rates, freqs):
-    n    = len(senyals)
+
+def experiment1_BODE(freqs, sampling_rates, senyals, folder, resistencia, time_to_show=10):
+    
+    def fmt_freq(value):
+        if value is None or not np.isfinite(value):
+            return "N/A"
+        if value >= 1e6:
+            return f"{value / 1e6:.3f} MHz"
+        if value >= 1e3:
+            return f"{value / 1e3:.3f} kHz"
+        return f"{value:.3f} Hz"
+
+    def extract_fundamental_amplitude(y, fs, target_freq):
+        y = np.asarray(y) - np.mean(y)
+        window = np.hanning(len(y))
+        spectrum = np.fft.rfft(y * window)
+        spectrum_mag = np.abs(spectrum)
+        freqs_fft = np.fft.rfftfreq(len(y), d=1 / fs)
+
+        freq_res = fs / len(y)
+        tolerance = max(0.15, (2 * freq_res) / target_freq)
+        lower_bound = target_freq * (1 - tolerance)
+        upper_bound = target_freq * (1 + tolerance)
+        mask = (freqs_fft >= lower_bound) & (freqs_fft <= upper_bound)
+
+        if np.any(mask):
+            mask_indices = np.where(mask)[0]
+            peak_idx_in_mask = np.argmax(spectrum_mag[mask])
+            peak_idx = mask_indices[peak_idx_in_mask]
+        else:
+            peak_idx = np.argmin(np.abs(freqs_fft - target_freq))
+
+        spectrum_mag = spectrum_mag * (4.0 / len(y))
+
+        return spectrum_mag[peak_idx], freqs_fft[peak_idx], freqs_fft, spectrum_mag
+
+    def find_bandpass_cutoffs(freqs, gains_db):
+        pk_idx = np.argmax(gains_db)
+        below_3db = np.where(gains_db <= -3.0)[0]
+
+        lower_cutoff = None
+        upper_cutoff = None
+
+        lower_idxs = below_3db[below_3db < pk_idx]
+        if len(lower_idxs) > 0:
+            i = lower_idxs[-1]
+            if i < len(freqs) - 1:
+                f1, f2 = freqs[i], freqs[i + 1]
+                g1, g2 = gains_db[i], gains_db[i + 1]
+                log_f1, log_f2 = np.log10(f1), np.log10(f2)
+                log_fc = log_f1 + (-3.0 - g1) * (log_f2 - log_f1) / (g2 - g1)
+                lower_cutoff = 10**log_fc
+
+        upper_idxs = below_3db[below_3db > pk_idx]
+        if len(upper_idxs) > 0:
+            i = upper_idxs[0]
+            if i > 0:
+                f1, f2 = freqs[i - 1], freqs[i]
+                g1, g2 = gains_db[i - 1], gains_db[i]
+                log_f1, log_f2 = np.log10(f1), np.log10(f2)
+                log_fc = log_f1 + (-3.0 - g1) * (log_f2 - log_f1) / (g2 - g1)
+                upper_cutoff = 10**log_fc
+
+        return lower_cutoff, upper_cutoff
+
+    def smooth_temporal_signal(data, sampling_rate, target_freq, smoothness_factor=0.02):
+        points_per_cycle = sampling_rate / target_freq
+        window_size = int(points_per_cycle * smoothness_factor)
+        if window_size < 3:
+            window_size = 3
+        if window_size % 2 == 0:
+            window_size += 1
+        window = np.ones(window_size) / window_size
+        smoothed_data = np.convolve(data, window, mode="same")
+        return smoothed_data
+
+    n = len(senyals)
     cols = 3
     rows = math.ceil(n / cols)
-    fig,axes = plt.subplots(rows, cols, figsize=(18, 4*rows))
-    axes = axes.flatten()
 
-    for idx, signal_Id in enumerate(signal_Ids):
-        fs  = sampling_rates[idx]
-        N   = len(signal_Id)
-        fft_vals = np.fft.rfft(signal_Id)
-        fft_mag  = np.abs(fft_vals) * 2 / N
-        fft_freq = np.fft.rfftfreq(N, d=1/fs)
-        
-        ax = axes[idx]
-        ax.plot(fft_freq / 1e3, fft_mag, linewidth=0.8, color='crimson')
-        ax.axvline(freqs[idx] / 1e3, color='navy', linestyle='--', linewidth=1,
-                label=f'f={freqs[idx]/1e3:.0f} kHz')
-        ax.set_title(f"{senyals[idx].upper()} — {freqs[idx]/1e3:.0f} kHz", fontsize=10)
-        ax.set_xlabel("Freqüència (kHz)", fontsize=8)
-        ax.set_ylabel("|I| (mA)", fontsize=8)
-        ax.tick_params(labelsize=7)
-        ax.legend(fontsize=7, loc='upper right')
-        ax.grid(True, alpha=0.3)
+    fig_time, axes_time = plt.subplots(rows, cols, figsize=(18, 4 * rows))
+    axes_time = axes_time.flatten()
+    fig_fft, axes_fft = plt.subplots(rows, cols, figsize=(18, 4 * rows))
+    axes_fft = axes_fft.flatten()
 
-    for i in range(n, len(axes)):
-        axes[i].set_visible(False)
+    system_gains = []
 
-    plt.suptitle("FFT del Corrent I per cada senyal", fontsize=13, y=1.005)
-    plt.tight_layout()
+    for idx, senyal in enumerate(senyals):
+        target_f = freqs[idx]
+        fs = sampling_rates[idx]
+        print(f"Processing {senyal.upper()} (Target: {fmt_freq(target_f)})...")
+
+        convertir_senyal_osciloscopi(
+            senyal_csv=f"fitxers/{folder}/{senyal}.csv",
+            senyal_neta_csv=f"fitxers/{folder}/{senyal}_neta.csv",
+            channels=2
+        )
+
+        v_in       = np.loadtxt(f"fitxers/{folder}/{senyal}_neta_tx.csv", delimiter=",")
+        v_mesurada = np.loadtxt(f"fitxers/{folder}/{senyal}_neta_rx.csv", delimiter=",")
+
+        i_out = ((v_in - v_mesurada) / resistencia) * 1000
+        i_out = smooth_temporal_signal(i_out, fs, target_f, smoothness_factor=0.035)
+
+        amp_out, freq_out, freqs_fft_out, spec_out = extract_fundamental_amplitude(i_out, fs, target_f)
+
+        freq_res = fs / len(v_in) / 1e3  # kHz
+        err_out = abs(freq_out - target_f) / target_f
+        if err_out > 0.15:
+            print(f"  [WARN] Freq mismatch! Target: {fmt_freq(target_f)} | Found: {fmt_freq(freq_out)} | Res: {freq_res:.3f} kHz")
+
+        gain = amp_out
+        system_gains.append(gain)
+        print(f"  Amplitude: {gain:.4f} mA  |  Found at: {fmt_freq(freq_out)}")
+
+        # Time domain plot
+        t = np.arange(len(i_out)) / fs * 1e6
+
+
+        cycles_to_show = 10
+        samples_to_show = min(int(cycles_to_show * fs / target_f), len(i_out))
+        signal_to_show = i_out[:samples_to_show]
+        t_to_show      = t[:samples_to_show]
+
+        ax_t = axes_time[idx]
+        ax_t.plot(t_to_show, signal_to_show, linewidth=0.8, color="tab:green", label="I (mA)")
+        ax_t.set_ylabel("Current (mA)", fontsize=8)
+        ax_t.set_title(f"Senyal {senyal.upper()} — {fmt_freq(target_f)}", fontsize=10)
+        ax_t.set_xlabel("Time (us)", fontsize=8)
+        ax_t.legend(fontsize=7, loc="upper right")
+        ax_t.tick_params(labelsize=7)
+        ax_t.grid(True, alpha=0.3)
+
+        # FFT plot
+        spec_out_norm = spec_out / np.max(spec_out) if np.max(spec_out) > 0 else spec_out
+
+        ax_f = axes_fft[idx]
+        ax_f.plot(freqs_fft_out, spec_out_norm, color="tab:green", alpha=0.7, label="I_out Spectrum")
+        ax_f.axvline(target_f, color="black", linestyle="--", label="Target Freq")
+        ax_f.plot(freq_out, spec_out_norm[np.where(freqs_fft_out == freq_out)[0][0]], "ro", markersize=6, label="Peak Found")
+        ax_f.set_xlim(max(0, target_f * 0.5), target_f * 1.5)
+        ax_f.set_title(f"FFT: {senyal.upper()} ({fmt_freq(target_f)}, Res: {freq_res:.3f} kHz)", fontsize=10)
+        ax_f.set_xlabel("Frequency (Hz)", fontsize=8)
+        ax_f.legend(fontsize=7)
+        ax_f.grid(True, alpha=0.3)
+
+    for i in range(n, len(axes_time)):
+        axes_time[i].set_visible(False)
+        axes_fft[i].set_visible(False)
+
+    fig_time.suptitle(f"Corrent I_out — {folder} (tallat a {time_to_show} us)", fontsize=14, y=1.01)
+    fig_time.tight_layout()
+    fig_time.savefig(f"fitxers/{folder}/time_domain.png", dpi=150, bbox_inches="tight")
     plt.show()
+    #plt.close(fig_time)
 
-    for idx, signal_Id in enumerate(signal_Ids):
-        I_dc = np.mean(signal_Id)
-        print(f"[{senyals[idx].upper()}] {freqs[idx]/1e3:>7.0f} kHz | I_dc = {I_dc:.3f} mA")
+    fig_fft.suptitle(f"FFT Peak Detection — {folder}", fontsize=14, y=1.01)
+    fig_fft.tight_layout()
+    fig_fft.savefig(f"fitxers/{folder}/fft_debug.png", dpi=150, bbox_inches="tight")
+    plt.show()
+    #plt.close(fig_fft)
+    print(f"Saved: fitxers/{folder}/fft_debug.png")
+    
+
+    # Bandwidth calculation
+    system_gains = np.array(system_gains)
+    max_gain = np.max(system_gains)
+    gains_db = 20 * np.log10(system_gains / max_gain)
+
+    f_lower, f_upper = find_bandpass_cutoffs(freqs, gains_db)
+
+    print("\n==========================================")
+    print(f"  LED DRIVER BANDWIDTH — {folder}")
+    print("==========================================")
+    print(f"  Peak Freq:               {fmt_freq(freqs[np.argmax(gains_db)])}")
+    print(f"  Lower -3 dB Cutoff (f_L): {fmt_freq(f_lower)}")
+    print(f"  Upper -3 dB Cutoff (f_H): {fmt_freq(f_upper)}")
+    if f_lower is not None and f_upper is not None:
+        print(f"  Passband Bandwidth (BW):  {fmt_freq(f_upper - f_lower)}")
+    elif f_upper is not None:
+        print(f"  Low-pass Bandwidth:       {fmt_freq(f_upper)}")
+    else:
+        print("  Bandwidth error: Gain didn't drop by -3 dB from peak.")
+    print("==========================================\n")
+
+    fig_bw, ax_bw = plt.subplots(figsize=(9, 5))
+    ax_bw.semilogx(np.array(freqs), gains_db, "o-", color="tab:blue", linewidth=1.5, label="Measured Driver Gain")
+    ax_bw.axhline(-3, color="gray", linestyle=":", alpha=0.8, label="-3 dB Cutoff Line")
+    if f_lower is not None:
+        ax_bw.axvline(f_lower, color="tab:orange", linestyle="--", label=f"f_L ({fmt_freq(f_lower)})")
+    if f_upper is not None:
+        ax_bw.axvline(f_upper, color="tab:red", linestyle="--", label=f"f_H ({fmt_freq(f_upper)})")
+    ax_bw.set_title(f"LED Driver Frequency Response — {folder}")
+    ax_bw.set_xlabel("Frequency (Hz)")
+    ax_bw.set_ylabel("Normalized Gain (dB)")
+    ax_bw.grid(True, which="both", alpha=0.4)
+    ax_bw.legend()
+    plt.tight_layout()
+    plt.savefig(f"fitxers/{folder}/system_frequency_response.png", dpi=150, bbox_inches="tight")
+    plt.show()
+    #plt.close()
+    print(f"Saved: fitxers/{folder}/system_frequency_response.png")
 
 def _decode_bits_from_signal(rx_signal, bits_per_sample, mode=None):
     rx_bits_raw = binaritzar(rx_signal)
@@ -409,33 +559,22 @@ def _decode_bits_from_signal(rx_signal, bits_per_sample, mode=None):
     
     return np.array(rx_bits)
 
-def experiment2_BERvsBitrate(tx_signal_sequence, rx_signals, bits_per_sample_rx, bit_rates):
-    print(f"\n--- EXPERIMENT 2: BER vs BITRATE ---")
+def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates):
+    results={}
 
-    tx_bits = np.array(tx_signal_sequence)
-    results = {}
+    for s, b, bit_rate in zip(signals, bits_per_sample_rx, bit_rates):
 
-    # --- Preprocessa tots els RX ---
-    for s in rx_signals:
-        signal_path = "fitxers/BW_RX/" + s
-        convertir_senyal_osciloscopi(signal_path + ".csv", signal_path + "_neta.csv", channels=1)
+        convertir_senyal_osciloscopi(
+            senyal_csv=f"fitxers/BER_v1/{s}.csv",
+            senyal_neta_csv=f"fitxers/BER_v1/{s}_neta.csv",
+            channels=2
+        )
 
-    # --- Processa cada RX ---
-    for s, b, bit_rate in zip(rx_signals, bits_per_sample_rx, bit_rates):
-        senyal_csv = "fitxers/BW_RX/" + s + "_neta.csv"
-        try:
-            rx_signal = np.loadtxt(senyal_csv, delimiter=',')
-        except Exception as e:
-            print(f"Error llegint {senyal_csv}: {e}")
-            results[s] = None
-            continue
+        tx_signal = np.loadtxt(f"fitxers/BER_v1/{s}_neta_tx.csv", delimiter=",")
+        rx_signal = np.loadtxt(f"fitxers/BER_v1/{s}_neta_rx.csv", delimiter=",")           
 
         rx_bits = _decode_bits_from_signal(rx_signal, b, mode=None)
-
-        if rx_bits is None or len(rx_bits) == 0:
-            print(f"[WARNING] No s'han pogut decodificar bits de {s}")
-            results[s] = None
-            continue
+        tx_bits = _decode_bits_from_signal(tx_signal, b, mode=None)
 
         ber, errors, total = _calculate_ber(tx_bits, rx_bits)
 
