@@ -559,36 +559,50 @@ def _decode_bits_from_signal(rx_signal, bits_per_sample, mode=None):
     
     return np.array(rx_bits)
 
+def _calculate_snr(tx_signal, rx_signal):
+    """
+    Calcula la SNR entre la senyal transmesa (neta) i la rebuda (amb soroll).
+    Retorna la SNR en dB.
+    """
+    # Assegurem la mateixa longitud
+    min_len = min(len(tx_signal), len(rx_signal))
+    tx = tx_signal[:min_len]
+    rx = rx_signal[:min_len]
+
+    noise = rx - tx                         # soroll estimat
+
+    power_signal = np.mean(tx ** 2)         # potència de la senyal
+    power_noise  = np.mean(noise ** 2)      # potència del soroll
+
+    if power_noise == 0:
+        return float('inf')                 # sense soroll
+
+    snr_db = 10 * np.log10(power_signal / power_noise)
+    return snr_db
 def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates):
-    results={}
 
+    results = {}
     for s, b, bit_rate in zip(signals, bits_per_sample_rx, bit_rates):
-
         convertir_senyal_osciloscopi(
             senyal_csv=f"fitxers/BER_v1/{s}.csv",
             senyal_neta_csv=f"fitxers/BER_v1/{s}_neta.csv",
             channels=2
         )
-
         tx_signal = np.loadtxt(f"fitxers/BER_v1/{s}_neta_tx.csv", delimiter=",")
-        rx_signal = np.loadtxt(f"fitxers/BER_v1/{s}_neta_rx.csv", delimiter=",")           
-
+        rx_signal = np.loadtxt(f"fitxers/BER_v1/{s}_neta_rx.csv", delimiter=",")
         rx_bits = _decode_bits_from_signal(rx_signal, b, mode=None)
         tx_bits = _decode_bits_from_signal(tx_signal, b, mode=None)
-
         ber, errors, total = _calculate_ber(tx_bits, rx_bits)
-
         results[s] = {
-            'ber':          ber,
-            'total_errors': errors,
-            'total_bits':   total,
-            'bit_rate':     bit_rate,
+            'ber'     : ber,
+            'errors'  : errors,
+            'total'   : total,
+            'bit_rate': bit_rate    # <-- clau 'bit_rate'
         }
         print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  @{bit_rate:.0f} bps")
 
     # --- Plot BER vs Bitrate ---
     valid = {s: v for s, v in results.items() if v is not None}
-
     if valid:
         sorted_items = sorted(valid.items(), key=lambda x: x[1]['bit_rate'])
         x      = [v['bit_rate'] for _, v in sorted_items]
@@ -597,7 +611,6 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates):
 
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.plot(x, y, marker='o', linewidth=2, color='steelblue', markersize=7)
-
         for xi, yi, label in zip(x, y, labels):
             ax.annotate(label, (xi, yi),
                         textcoords="offset points", xytext=(6, 6),
@@ -625,7 +638,68 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates):
         print("No hi ha resultats vàlids per fer el plot.")
 
     return results
+def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample):
 
+    results = {}
+    for s, d in zip(signals, distances):
+        convertir_senyal_osciloscopi(
+            senyal_csv=f"fitxers/SNRvsDISTANCE/{s}.csv",
+            senyal_neta_csv=f"fitxers/SNRvsDISTANCE/{s}_neta.csv",
+            channels=2
+        )
+        tx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{s}_neta_tx.csv", delimiter=",")
+        rx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{s}_neta_rx.csv", delimiter=",")
+        rx_bits = _decode_bits_from_signal(rx_signal, bits_per_sample, mode=None)
+        tx_bits = _decode_bits_from_signal(tx_signal, bits_per_sample, mode=None)
+        ber, errors, total = _calculate_ber(tx_bits, rx_bits)
+        snr = _calculate_snr(tx_signal, rx_signal)
+
+        results[s] = {
+            'ber'     : ber,
+            'errors'  : errors,
+            'total'   : total,
+            'distance': d,
+            'snr'     : snr        # <-- nou
+        }
+        print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  SNR = {snr:.2f} dB  @{d:.0f} m")
+
+    # --- Plot BER vs Distance ---
+    valid = {s: v for s, v in results.items() if v is not None}
+    if valid:
+        sorted_items = sorted(valid.items(), key=lambda x: x[1]['distance'])  # <-- 'distance' (singular)
+        x      = [v['distance'] for _, v in sorted_items]
+        y      = [v['ber']      for _, v in sorted_items]
+        labels = [s             for s, _ in sorted_items]
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(x, y, marker='o', linewidth=2, color='steelblue', markersize=7)
+        for xi, yi, label in zip(x, y, labels):
+            ax.annotate(label, (xi, yi),
+                        textcoords="offset points", xytext=(6, 6),
+                        fontsize=8, color='dimgray')
+
+        # Mark d_max: last distance where BER < 0.01 (1%)
+        d_max = None
+        for xi, yi in zip(x, y):
+            if yi < 0.01:
+                d_max = xi
+        if d_max:
+            ax.axvline(d_max, color='red', linestyle='--', linewidth=1.5,
+                       label=f'$d_{{max}}$ = {d_max:.0f} cm')
+            ax.legend(fontsize=10)
+
+        ax.set_xlabel("Distance (m)", fontsize=12)
+        ax.set_ylabel("BER", fontsize=12)
+        ax.set_title("BER vs Distance", fontsize=14)
+        ax.set_yscale('symlog', linthresh=1e-3)
+        ax.set_ylim(bottom=0)
+        ax.grid(True, which='both', alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("No hi ha resultats vàlids per fer el plot.")
+
+    return results
 """
 def experiment2_BERvsBitrate(tx_signal_sequence, rx_signals, bits_per_sample_rx, bit_rates):
     
