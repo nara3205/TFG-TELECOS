@@ -261,18 +261,17 @@ def _calculate_ber(tx_bits, rx_bits):
     # El pic de correlació indica on el TX s'assembla més al RX
     best_offset = int(np.argmax(correlation))
 
-    # --- Acumula BER sobre tots els cicles complets a partir del millor offset ---
-    total_errors = 0
-    total_bits = 0
-    pos = best_offset
+    # --- Compara TOTS els bits rebuts usant l'alineació trobada ---
+    # best_offset is the phase of the PRBS at rx_bits[0]: the reference bit
+    # for rx position i is prbs_gold[(i + n_tx - best_offset%n_tx) % n_tx].
+    # This single modular-index expression covers bits before *and* after
+    # best_offset (the AWG loops continuously, so the pre-offset tail is
+    # just the end of the previous PRBS period).
+    phase = best_offset % n_tx
+    ref = tx_bits[(np.arange(n_rx) + n_tx - phase) % n_tx]
 
-    while pos + n_tx <= n_rx:
-        total_errors += int(np.sum(tx_bits != rx_bits[pos : pos + n_tx]))
-        total_bits += n_tx
-        pos += n_tx
-
-    if total_bits == 0:
-        return float("nan"), 0, 0
+    total_errors = int(np.sum(ref != rx_bits))
+    total_bits   = n_rx
 
     return total_errors / total_bits, total_errors, total_bits
 
