@@ -497,7 +497,7 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates, experiment=
         else:
             rx_signal = np.loadtxt(f"fitxers/{experiment}/{s}_neta.csv", delimiter=",")
        
-        rx_bits = _decode_bits_from_signal(rx_signal, b, mode=mode, len_tx=N_BITS)
+        rx_bits = _decode_bits_from_signal(rx_signal, b, mode=mode, len_tx=len(prbs_gold))
         if version == 1:
             ber, errors, total = _calculate_ber(prbs_gold, rx_bits)
         else:
