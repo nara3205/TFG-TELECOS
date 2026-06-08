@@ -1,5 +1,6 @@
 import math
 import subprocess
+from weakref import ref
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -540,24 +541,24 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates, experiment=
 
     return results
 
-def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample):
+def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv"):
 
     results = {}
+    tx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{ref}", delimiter=",")
     for s, d in zip(signals, distances):
         convertir_senyal_osciloscopi(
             senyal_csv=f"fitxers/SNRvsDISTANCE/{s}.csv",
             senyal_neta_csv=f"fitxers/SNRvsDISTANCE/{s}_neta.csv",
-            channels=2,
+            channels=1,
         )
-        tx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{s}_neta_tx.csv", delimiter=",")
-        rx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{s}_neta_rx.csv", delimiter=",")
+        rx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{s}_neta.csv", delimiter=",")
+            
         rx_bits = _decode_bits_from_signal(rx_signal, bits_per_sample, mode="OOK")
-        tx_bits = _decode_bits_from_signal(tx_signal, bits_per_sample, mode="OOK")
-        ber, errors, total = _calculate_ber(tx_bits, rx_bits)
+        ber, errors, total = _calculate_ber_v2(tx_signal, rx_bits)
         snr = _calculate_snr(tx_signal, rx_signal)
 
         results[s] = {"ber": ber, "errors": errors, "total": total, "distance": d, "snr": snr}  # <-- nou
-        print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  SNR = {snr:.2f} dB  @{d:.0f} m")
+        print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  SNR = {snr:.2f} dB  @{d:.0f} cm")
 
     # --- Plot BER vs Distance ---
     valid = {s: v for s, v in results.items() if v is not None}
