@@ -67,8 +67,9 @@ def _calculate_ber_v2(tx_bits, rx_bits):
     rx_bipolar = 2 * rx_bits - 1
     correlation = np.correlate(rx_bipolar, tx_bipolar, mode="valid")
     best_offset = int(np.argmax(correlation))
-
+      
     total_errors = int(np.sum(tx_bits != rx_bits[best_offset : best_offset + n_tx]))
+    
     return total_errors / n_tx, total_errors, n_tx
 
 def _calculate_ber(tx_bits, rx_bits):
@@ -108,7 +109,7 @@ def _calculate_ber(tx_bits, rx_bits):
     total_bits   = n_rx
 
     return total_errors / total_bits, total_errors, total_bits
-
+    
 def binaritzar(rx_signal):
     v_max, v_min = np.max(rx_signal), np.min(rx_signal)
     threshold = (v_max + v_min) / 2
@@ -558,7 +559,7 @@ def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv
         snr = _calculate_snr(tx_signal, rx_signal)
 
         results[s] = {"ber": ber, "errors": errors, "total": total, "distance": d, "snr": snr}  # <-- nou
-        print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  SNR = {snr:.2f} dB  @{d:.0f} cm")
+        print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  @{d:.0f} cm")
 
     # --- Plot BER vs Distance ---
     valid = {s: v for s, v in results.items() if v is not None}
