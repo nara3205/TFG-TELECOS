@@ -68,6 +68,9 @@ def _calculate_ber_v2(tx_bits, rx_bits):
     correlation = np.correlate(rx_bipolar, tx_bipolar, mode="valid")
     best_offset = int(np.argmax(correlation))
       
+    for i in range(0,n_tx):
+        if rx_bits[best_offset + i] != tx_bits[i]:
+            continue
     total_errors = int(np.sum(tx_bits != rx_bits[best_offset : best_offset + n_tx]))
     
     return total_errors / n_tx, total_errors, n_tx
@@ -507,45 +510,56 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates, experiment=
         results[s] = {"ber": ber, "errors": errors, "total": total, "bit_rate": bit_rate}      
         print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  @{bit_rate:.0f} bps")
 
-    # --- Plot BER vs Bitrate ---
     valid = {s: v for s, v in results.items() if v is not None}
     if valid:
         sorted_items = sorted(valid.items(), key=lambda x: x[1]["bit_rate"])
         x = [v["bit_rate"] for _, v in sorted_items]
         y = [v["ber"] for _, v in sorted_items]
-        labels = [s for s, _ in sorted_items]
+
+        # Interpolation over all signals
+        x_interp = np.linspace(min(x), max(x), 500)
+        y_interp = np.interp(x_interp, x, y)
+
+        ber_target = 0.1
+        d_at_target = None
+        for i in range(len(y_interp) - 1):
+            if y_interp[i] <= ber_target <= y_interp[i + 1] or \
+               y_interp[i] >= ber_target >= y_interp[i + 1]:
+                d_at_target = np.interp(ber_target,
+                                        [y_interp[i], y_interp[i + 1]],
+                                        [x_interp[i], x_interp[i + 1]])
+                break
 
         fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(x, y, marker="o", linewidth=2, color="steelblue", markersize=7)
-        for xi, yi, label in zip(x, y, labels):
-            ax.annotate(label, (xi, yi), textcoords="offset points", xytext=(6, 6), fontsize=8, color="dimgray")
 
-        # Mark Rb_max: last bitrate where BER < 0.01 (1%)
-        rb_max = None
-        for xi, yi in zip(x, y):
-            if yi < 0.01:
-                rb_max = xi
-        if rb_max:
-            ax.axvline(rb_max, color="red", linestyle="--", linewidth=1.5, label=f"$R_b^{{max}}$ = {rb_max:.0f} bps")
-            ax.legend(fontsize=10)
+        # Plot all signals
+        ax.plot(x_interp, y_interp, linewidth=2,
+                color="steelblue", label="BER interpolat")
+        ax.scatter(x, y, color="steelblue", zorder=5, s=50)
 
-        ax.set_xlabel("Bit Rate (bps)", fontsize=12)
+        ax.axhline(ber_target, color="orange", linestyle="--",
+                   linewidth=1.5, label="BER = 0.1")
+
+        if d_at_target:
+            ax.axvline(d_at_target, color="red", linestyle="--",
+                       linewidth=1.5,
+                       label=f"$d$ @ BER=0.1 = {d_at_target:.0f} bps")
+            ax.plot(d_at_target, ber_target, "ro", markersize=8, zorder=6)
+
+        ax.set_xlabel("Bitrate (bps)", fontsize=12)
         ax.set_ylabel("BER", fontsize=12)
-        ax.set_title("BER vs Bit Rate", fontsize=14)
-        ax.set_yscale("symlog", linthresh=1e-3)
-        ax.set_ylim(bottom=0)
+        ax.set_title("BER vs Bitrate", fontsize=14)
+        ax.legend(fontsize=10)
         ax.grid(True, which="both", alpha=0.3)
         plt.tight_layout()
         plt.show()
-    else:
-        print("No hi ha resultats vàlids per fer el plot.")
 
     return results
 
 def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv"):
-
     results = {}
     tx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{ref}", delimiter=",")
+
     for s, d in zip(signals, distances):
         convertir_senyal_osciloscopi(
             senyal_csv=f"fitxers/SNRvsDISTANCE/{s}.csv",
@@ -553,50 +567,68 @@ def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv
             channels=1,
         )
         rx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{s}_neta.csv", delimiter=",")
-            
         rx_bits = _decode_bits_from_signal(rx_signal, bits_per_sample, mode="OOK")
         ber, errors, total = _calculate_ber_v2(tx_signal, rx_bits)
         snr = _calculate_snr(tx_signal, rx_signal)
-
-        results[s] = {"ber": ber, "errors": errors, "total": total, "distance": d, "snr": snr}  # <-- nou
+        results[s] = {"ber": ber, "errors": errors, "total": total, 
+                      "distance": d, "snr": snr}
         print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  @{d:.0f} cm")
 
-    # --- Plot BER vs Distance ---
+
     valid = {s: v for s, v in results.items() if v is not None}
     if valid:
-        sorted_items = sorted(valid.items(), key=lambda x: x[1]["distance"])  # <-- 'distance' (singular)
+        sorted_items = sorted(valid.items(), key=lambda x: x[1]["distance"])
         x = [v["distance"] for _, v in sorted_items]
         y = [v["ber"] for _, v in sorted_items]
-        labels = [s for s, _ in sorted_items]
+
+        # Interpolation over all signals
+        x_interp = np.linspace(min(x), max(x), 500)
+        y_interp = np.interp(x_interp, x, y)
+
+        # BER = 0.1 crossing calculated only from 3rd signal onwards
+        x_from3 = x[2:]
+        y_from3 = y[2:]
+        x_interp_from3 = np.linspace(min(x_from3), max(x_from3), 500)
+        y_interp_from3 = np.interp(x_interp_from3, x_from3, y_from3)
+
+        ber_target = 0.1
+        d_at_target = None
+        for i in range(len(y_interp_from3) - 1):
+            if y_interp_from3[i] <= ber_target <= y_interp_from3[i + 1] or \
+               y_interp_from3[i] >= ber_target >= y_interp_from3[i + 1]:
+                d_at_target = np.interp(ber_target,
+                                        [y_interp_from3[i], y_interp_from3[i + 1]],
+                                        [x_interp_from3[i], x_interp_from3[i + 1]])
+                break
 
         fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(x, y, marker="o", linewidth=2, color="steelblue", markersize=7)
-        for xi, yi, label in zip(x, y, labels):
-            ax.annotate(label, (xi, yi), textcoords="offset points", xytext=(6, 6), fontsize=8, color="dimgray")
 
-        # Mark d_max: last distance where BER < 0.01 (1%)
-        d_max = None
-        for xi, yi in zip(x, y):
-            if yi < 0.01:
-                d_max = xi
-        if d_max:
-            ax.axvline(d_max, color="red", linestyle="--", linewidth=1.5, label=f"$d_{{max}}$ = {d_max:.0f} cm")
-            ax.legend(fontsize=10)
+        # Plot all signals
+        ax.plot(x_interp, y_interp, linewidth=2,
+                color="steelblue", label="BER interpolat")
+        ax.scatter(x, y, color="steelblue", zorder=5, s=50)
 
-        ax.set_xlabel("Distance (m)", fontsize=12)
+        ax.axhline(ber_target, color="orange", linestyle="--",
+                   linewidth=1.5, label="BER = 0.1")
+
+        if d_at_target:
+            ax.axvline(d_at_target, color="red", linestyle="--",
+                       linewidth=1.5,
+                       label=f"$d$ @ BER=0.1 = {d_at_target:.0f} cm")
+            ax.plot(d_at_target, ber_target, "ro", markersize=8, zorder=6)
+
+        ax.set_xlabel("Distance (cm)", fontsize=12)
         ax.set_ylabel("BER", fontsize=12)
         ax.set_title("BER vs Distance", fontsize=14)
-        ax.set_yscale("symlog", linthresh=1e-3)
-        ax.set_ylim(bottom=0)
+        ax.legend(fontsize=10)
         ax.grid(True, which="both", alpha=0.3)
         plt.tight_layout()
         plt.show()
+
     else:
         print("No hi ha resultats vàlids per fer el plot.")
 
     return results
-
-
 """
 
 
