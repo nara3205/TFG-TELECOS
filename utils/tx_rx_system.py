@@ -1,6 +1,5 @@
 import math
 import subprocess
-from weakref import ref
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -52,26 +51,62 @@ def codificar(mode=None, message=None, num_repeats=None):
     print(f"Senyal guardat a {nom_csv}")
     executar_comanda(f"python3 utils/csv2arb.py {nom_csv}")
 
-def _calculate_ber_v2(tx_bits, rx_bits):
+def _calculate_ber_v2(tx_bits, rx_bits, mode="OOK"):
+
     tx_bits = np.array(tx_bits, dtype=int)
     rx_bits = np.array(rx_bits, dtype=int)
     n_tx = len(tx_bits)
     n_rx = len(rx_bits)
+    if mode=="OOK":
+        if n_rx < n_tx:
+            compare_len = n_rx
+            errors = int(np.sum(tx_bits[:compare_len] != rx_bits[:compare_len]))
+            return errors / compare_len, errors, compare_len
 
-    if n_rx < n_tx:
-        compare_len = n_rx
-        errors = int(np.sum(tx_bits[:compare_len] != rx_bits[:compare_len]))
-        return errors / compare_len, errors, compare_len
+        tx_bipolar = 2 * tx_bits - 1
+        rx_bipolar = 2 * rx_bits - 1
+        correlation = np.correlate(rx_bipolar, tx_bipolar, mode="valid")
+        best_offset = int(np.argmax(correlation))
+        total_errors = int(np.sum(tx_bits != rx_bits[best_offset : best_offset + n_tx]))
+    
+    else: 
+        total_errors = 0
+        min_zero_run = int(100)
+        i = 0
+        i_saved = 0
+        zero_run = 0
+        sync_found = False
 
-    tx_bipolar = 2 * tx_bits - 1
-    rx_bipolar = 2 * rx_bits - 1
-    correlation = np.correlate(rx_bipolar, tx_bipolar, mode="valid")
-    best_offset = int(np.argmax(correlation))
-      
-    for i in range(0,n_tx):
-        if rx_bits[best_offset + i] != tx_bits[i]:
-            continue
-    total_errors = int(np.sum(tx_bits != rx_bits[best_offset : best_offset + n_tx]))
+        while i < len(rx_bits):
+            if rx_bits[i] == 0:
+                zero_run += 1
+            else:
+                if zero_run >= min_zero_run:
+                    sync_found = True
+                    i_saved=i
+                    break
+                zero_run = 0
+            i += 1
+
+        if not sync_found:
+            return np.array([])
+
+        end = min(i + n_tx, n_rx)
+        results = []
+        while i + 1 < end:
+            c1, c2 = rx_bits[i], rx_bits[i + 1]
+            if c1 == 1 and c2 == 1 and i==i_saved:
+                i -= 1
+                continue
+            elif   c1 == 1 and c2 == 0:
+                results.append(1)
+            elif c1 == 0 and c2 == 1:
+                results.append(0)
+            else:
+                total_errors +=1
+
+            i += 2
+
     
     return total_errors / n_tx, total_errors, n_tx
 
@@ -112,7 +147,48 @@ def _calculate_ber(tx_bits, rx_bits):
     total_bits   = n_rx
 
     return total_errors / total_bits, total_errors, total_bits
+
+def calculate_snr(tx_bits, analog_samples):
+    """
+    Calcula la SNR analógica a partir de los voltajes recibidos en el centro del bit.
+    Normaliza la señal analógica para mapear los voltajes al rango [0, 1] 
+    y calcula la potencia del ruido real (varianza).
+    """
+    tx_bits = np.array(tx_bits, dtype=int)
+    analog_samples = np.array(analog_samples, dtype=float)
+    n_tx = len(tx_bits)
     
+    v_min = np.min(analog_samples)
+    v_max = np.max(analog_samples)
+    
+    if v_max == v_min:
+        return -99.0, 0.0, n_tx, n_tx
+        
+    analog_norm = (analog_samples - v_min) / (v_max - v_min)
+    
+    rx_bits_hard = (analog_norm > 0.5).astype(int)
+    tx_bipolar = 2 * tx_bits - 1
+    rx_bipolar = 2 * rx_bits_hard - 1
+    
+    correlation = np.correlate(rx_bipolar, tx_bipolar, mode="valid")
+    best_offset = int(np.argmax(correlation))
+
+    rx_bits_aligned = rx_bits_hard[best_offset : best_offset + n_tx]
+    analog_norm_aligned = analog_norm[best_offset : best_offset + n_tx]
+    
+    error_signal = analog_norm_aligned - tx_bits  
+    
+    bit_errors = int(np.sum(tx_bits != rx_bits_aligned))
+    
+    power_signal = np.mean(tx_bits ** 2)
+    
+    power_noise = np.mean(error_signal ** 2)
+        
+    snr_linear = power_signal / power_noise
+    snr_db = 10 * np.log10(snr_linear)
+    
+    return snr_db, snr_linear, bit_errors, n_tx
+
 def binaritzar(rx_signal):
     v_max, v_min = np.max(rx_signal), np.min(rx_signal)
     threshold = (v_max + v_min) / 2
@@ -198,7 +274,7 @@ def generate_prbs(seed: int = 42, nom_csv="fitxers/prbs.csv", mode="OOK", size =
     else:
         raise ValueError(f"Unknown type '{type}'. Use 'ook' or 'manchester'.")
    
-def _decode_bits_from_signal(rx_signal, bits_per_sample, mode=None, len_tx=N_BITS):
+def _decode_bits_from_signal(rx_signal, bits_per_sample):
     rx_bits_raw = binaritzar(rx_signal)
 
     flancs = [i for i in range(1, len(rx_bits_raw)) if rx_bits_raw[i] != rx_bits_raw[i - 1]]
@@ -217,68 +293,32 @@ def _decode_bits_from_signal(rx_signal, bits_per_sample, mode=None, len_tx=N_BIT
         valor = rx_bits_raw[sample_idx]
         rx_bits.extend([valor] * n_bits)
 
-    rx_bits = np.array(rx_bits)
+    return np.array(rx_bits)
 
-    if mode == "OOK":
-        return rx_bits
-    
-    min_zero_run = int(2048)
-    i = 0
-    i_saved = 0
-    zero_run = 0
-    sync_found = False
+def _decode_raw_from_signal(rx_signal, bits_per_sample):
+    rx_bits_raw = binaritzar(rx_signal)
+    flancs = [i for i in range(1, len(rx_bits_raw)) if rx_bits_raw[i] != rx_bits_raw[i - 1]]
+    flancs.append(len(rx_bits_raw))
+    flancs = np.array(flancs)
 
-    while i < len(rx_bits):
-        if rx_bits[i] == 0:
-            zero_run += 1
-        else:
-            if zero_run >= min_zero_run:
-                sync_found = True
-                i_saved=i
-                break
-            zero_run = 0
-        i += 1
-
-    if not sync_found:
+    if len(flancs) < 2:
         return np.array([])
 
-    end = min(i + len_tx, len(rx_bits))
-    results = []
-    while i + 1 < end:
-        c1, c2 = rx_bits[i], rx_bits[i + 1]
-        if   c1 == 1 and c2 == 0:
-            results.append(1)
-        elif c1 == 0 and c2 == 1:
-            results.append(0)
-        elif c1 == 1 and c2 == 1 and i==i_saved:
-            i -= 1
-            continue
-        i += 2
+    rx_analog_samples = []
+    for i in range(len(flancs) - 1):
+        durada = flancs[i + 1] - flancs[i]
+        n_bits = max(1, int(round(durada / bits_per_sample)))
+        
+        # En lugar de hacer un .extend del mismo valor, remuestreamos 
+        # el centro de cada bit real dentro de este pulso ancho
+        for b in range(n_bits):
+            offset_centro = int((b + 0.5) * bits_per_sample)
+            sample_idx = min(flancs[i] + offset_centro, len(rx_signal) - 1)
+            
+            # Guardamos el voltaje analógico real de cada bit individual
+            rx_analog_samples.append(rx_signal[sample_idx])
 
-    return np.array(results)
-
-
-
-def _calculate_snr(tx_signal, rx_signal):
-    """
-    Calcula la SNR entre la senyal transmesa (neta) i la rebuda (amb soroll).
-    Retorna la SNR en dB.
-    """
-    # Assegurem la mateixa longitud
-    min_len = min(len(tx_signal), len(rx_signal))
-    tx = tx_signal[:min_len]
-    rx = rx_signal[:min_len]
-
-    noise = rx - tx  # soroll estimat
-
-    power_signal = np.mean(tx**2)  # potència de la senyal
-    power_noise = np.mean(noise**2)  # potència del soroll
-
-    if power_noise == 0:
-        return float("inf")  # sense soroll
-
-    snr_db = 10 * np.log10(power_signal / power_noise)
-    return snr_db
+    return np.array(rx_analog_samples)
 
 def experiment1_BODE(freqs, sampling_rates, senyals, folder, resistencia, time_to_show=10):
 
@@ -406,9 +446,9 @@ def experiment1_BODE(freqs, sampling_rates, senyals, folder, resistencia, time_t
 
         ax_t = axes_time[idx]
         ax_t.plot(t_to_show, signal_to_show, linewidth=0.8, color="tab:green", label="I (mA)")
-        ax_t.set_ylabel("Current (mA)", fontsize=8)
-        ax_t.set_title(f"Senyal {senyal.upper()} — {fmt_freq(target_f)}", fontsize=10)
-        ax_t.set_xlabel("Time (us)", fontsize=8)
+        ax_t.set_ylabel("Corrent (mA)", fontsize=8)
+        ax_t.set_title(f"Senyal {fmt_freq(target_f)}", fontsize=10)
+        ax_t.set_xlabel("Temps (us)", fontsize=8)
         ax_t.legend(fontsize=7, loc="upper right")
         ax_t.tick_params(labelsize=7)
         ax_t.grid(True, alpha=0.3)
@@ -432,7 +472,6 @@ def experiment1_BODE(freqs, sampling_rates, senyals, folder, resistencia, time_t
         axes_time[i].set_visible(False)
         axes_fft[i].set_visible(False)
 
-    fig_time.suptitle(f"Corrent I_out — {folder} (tallat a {time_to_show} us)", fontsize=14, y=1.01)
     fig_time.tight_layout()
     fig_time.savefig(f"fitxers/{folder}/time_domain.png", dpi=150, bbox_inches="tight")
     plt.show()
@@ -467,15 +506,15 @@ def experiment1_BODE(freqs, sampling_rates, senyals, folder, resistencia, time_t
     print("==========================================\n")
 
     fig_bw, ax_bw = plt.subplots(figsize=(9, 5))
-    ax_bw.semilogx(np.array(freqs), gains_db, "o-", color="tab:blue", linewidth=1.5, label="Measured Driver Gain")
-    ax_bw.axhline(-3, color="gray", linestyle=":", alpha=0.8, label="-3 dB Cutoff Line")
+    ax_bw.semilogx(np.array(freqs), gains_db, "o-", color="tab:blue", linewidth=1.5)
+    ax_bw.axhline(-3, color="gray", linestyle=":", alpha=0.8, label="-3dB")
     if f_lower is not None:
         ax_bw.axvline(f_lower, color="tab:orange", linestyle="--", label=f"f_L ({fmt_freq(f_lower)})")
     if f_upper is not None:
         ax_bw.axvline(f_upper, color="tab:red", linestyle="--", label=f"f_H ({fmt_freq(f_upper)})")
-    ax_bw.set_title(f"LED Driver Frequency Response — {folder}")
-    ax_bw.set_xlabel("Frequency (Hz)")
-    ax_bw.set_ylabel("Normalized Gain (dB)")
+    ax_bw.set_title(f"Resposta frequencial del LED Driver")
+    ax_bw.set_xlabel("Frequència (Hz)")
+    ax_bw.set_ylabel("Guany normalitzat (dB)")
     ax_bw.grid(True, which="both", alpha=0.4)
     ax_bw.legend()
     plt.tight_layout()
@@ -502,13 +541,13 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates, experiment=
         else:
             rx_signal = np.loadtxt(f"fitxers/{experiment}/{s}_neta.csv", delimiter=",")
        
-        rx_bits = _decode_bits_from_signal(rx_signal, b, mode=mode, len_tx=len(prbs_gold))
+        rx_bits = _decode_bits_from_signal(rx_signal, b)
         if version == 1:
             ber, errors, total = _calculate_ber(prbs_gold, rx_bits)
         else:
-            ber, errors, total = _calculate_ber_v2(prbs_gold, rx_bits)
+            ber, errors, total = _calculate_ber_v2(prbs_gold, rx_bits, mode,)
         results[s] = {"ber": ber, "errors": errors, "total": total, "bit_rate": bit_rate}      
-        print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  @{bit_rate:.0f} bps")
+        print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  @{bit_rate:.0f} baud")
 
     valid = {s: v for s, v in results.items() if v is not None}
     if valid:
@@ -520,7 +559,7 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates, experiment=
         x_interp = np.linspace(min(x), max(x), 500)
         y_interp = np.interp(x_interp, x, y)
 
-        ber_target = 0.1
+        ber_target = 0.01
         d_at_target = None
         for i in range(len(y_interp) - 1):
             if y_interp[i] <= ber_target <= y_interp[i + 1] or \
@@ -534,21 +573,21 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates, experiment=
 
         # Plot all signals
         ax.plot(x_interp, y_interp, linewidth=2,
-                color="steelblue", label="BER interpolat")
+                color="steelblue")
         ax.scatter(x, y, color="steelblue", zorder=5, s=50)
 
         ax.axhline(ber_target, color="orange", linestyle="--",
-                   linewidth=1.5, label="BER = 0.1")
+                   linewidth=1.5, label="BER = 0.01")
 
         if d_at_target:
             ax.axvline(d_at_target, color="red", linestyle="--",
                        linewidth=1.5,
-                       label=f"$d$ @ BER=0.1 = {d_at_target:.0f} bps")
-            ax.plot(d_at_target, ber_target, "ro", markersize=8, zorder=6)
+                       label=f"{d_at_target:.0f} baud")
+            #ax.plot(d_at_target, ber_target, "ro", markersize=8, zorder=6)
 
-        ax.set_xlabel("Bitrate (bps)", fontsize=12)
+        ax.set_xlabel("Symbol rate (baud)", fontsize=12)
         ax.set_ylabel("BER", fontsize=12)
-        ax.set_title("BER vs Bitrate", fontsize=14)
+        ax.set_title("BER vs Symbol rate ", fontsize=14)
         ax.legend(fontsize=10)
         ax.grid(True, which="both", alpha=0.3)
         plt.tight_layout()
@@ -556,7 +595,7 @@ def experiment2_BERvsBitrate(signals, bits_per_sample_rx, bit_rates, experiment=
 
     return results
 
-def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv"):
+def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv", mode="OOK"):
     results = {}
     tx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{ref}", delimiter=",")
 
@@ -567,11 +606,9 @@ def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv
             channels=1,
         )
         rx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{s}_neta.csv", delimiter=",")
-        rx_bits = _decode_bits_from_signal(rx_signal, bits_per_sample, mode="OOK")
-        ber, errors, total = _calculate_ber_v2(tx_signal, rx_bits)
-        snr = _calculate_snr(tx_signal, rx_signal)
-        results[s] = {"ber": ber, "errors": errors, "total": total, 
-                      "distance": d, "snr": snr}
+        rx_bits = _decode_bits_from_signal(rx_signal, bits_per_sample)
+        ber, errors, total = _calculate_ber_v2(tx_signal, rx_bits, mode)
+        results[s] = {"ber": ber, "errors": errors, "total": total, "distance": d}
         print(f"  {s:30s}  BER = {ber:.6f}  ({errors}/{total} errors)  @{d:.0f} cm")
 
 
@@ -591,7 +628,7 @@ def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv
         x_interp_from3 = np.linspace(min(x_from3), max(x_from3), 500)
         y_interp_from3 = np.interp(x_interp_from3, x_from3, y_from3)
 
-        ber_target = 0.1
+        ber_target = 0.01
         d_at_target = None
         for i in range(len(y_interp_from3) - 1):
             if y_interp_from3[i] <= ber_target <= y_interp_from3[i + 1] or \
@@ -605,17 +642,16 @@ def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv
 
         # Plot all signals
         ax.plot(x_interp, y_interp, linewidth=2,
-                color="steelblue", label="BER interpolat")
+                color="steelblue")
         ax.scatter(x, y, color="steelblue", zorder=5, s=50)
 
         ax.axhline(ber_target, color="orange", linestyle="--",
-                   linewidth=1.5, label="BER = 0.1")
+                   linewidth=1.5, label="BER = 0.01")
 
         if d_at_target:
             ax.axvline(d_at_target, color="red", linestyle="--",
                        linewidth=1.5,
-                       label=f"$d$ @ BER=0.1 = {d_at_target:.0f} cm")
-            ax.plot(d_at_target, ber_target, "ro", markersize=8, zorder=6)
+                       label=f"{d_at_target:.0f} cm")
 
         ax.set_xlabel("Distance (cm)", fontsize=12)
         ax.set_ylabel("BER", fontsize=12)
@@ -629,9 +665,78 @@ def experiment3_BERvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv
         print("No hi ha resultats vàlids per fer el plot.")
 
     return results
+
+def experiment4_SNRvsDISTANCE(signals, distances, bits_per_sample, ref="prbs.csv"):
+    results = {}
+    tx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{ref}", delimiter=",")
+    
+    for s, d in zip(signals, distances):
+        convertir_senyal_osciloscopi(
+            senyal_csv=f"fitxers/SNRvsDISTANCE/{s}.csv",
+            senyal_neta_csv=f"fitxers/SNRvsDISTANCE/{s}_neta.csv",
+            channels=1,
+        )
+        rx_signal = np.loadtxt(f"fitxers/SNRvsDISTANCE/{s}_neta.csv", delimiter=",")
+        rx_bits = _decode_raw_from_signal(rx_signal, bits_per_sample)
+        snr_db, snr_linear, errors, total = calculate_snr(tx_signal, rx_bits)
+        
+        results[s] = {
+            "snr_db": snr_db,
+            "snr_linear": snr_linear,
+            "distance": d,
+            "errors": errors,
+            "total_signal": total
+        }
+        print(f"  {s:30s}  SNR = {snr_db:7.2f} dB, {snr_linear} @{d:6.1f} cm BER = {(errors/total):.6f}  ({errors}/{total} errors)")
+    
+    if results:
+        sorted_items = sorted(results.items(), key=lambda x: x[1]["distance"])
+        x = np.array([v["distance"] for _, v in sorted_items])
+        y = np.array([v["snr_db"] for _, v in sorted_items])
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(x, y, "o-", color="steelblue", linewidth=2.5, markersize=10)
+        ax.set_xlabel("Distance (cm)", fontsize=12, fontweight='bold')
+        ax.set_ylabel("SNR (dB)", fontsize=12, fontweight='bold')
+        ax.set_title("SNR vs Distance", fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        
+        # Add value labels on points
+        for xi, yi in zip(x, y):
+            ax.annotate(f'{yi:.2f} dB', (xi, yi), textcoords="offset points", 
+                       xytext=(0, 10), ha='center', fontsize=10, fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig(f"fitxers/SNRvsDISTANCE/snr_vs_distance.png", dpi=150, bbox_inches="tight")
+        plt.show()
+        
+        print(f"\nSaved plot to: fitxers/SNRvsDISTANCE/snr_vs_distance.png")
+    
+    return results
+
 """
+def _calculate_snr(tx_signal, rx_signal):
+    
+    ##Calcula la SNR entre la senyal transmesa (neta) i la rebuda (amb soroll).
+    ##Retorna la SNR en dB.
+    
+    # Assegurem la mateixa longitud
+    min_len = min(len(tx_signal), len(rx_signal))
+    tx = tx_signal[:min_len]
+    rx = rx_signal[:min_len]
 
+    noise = rx - tx  # soroll estimat
 
+    power_signal = np.mean(tx**2)  # potència de la senyal
+    power_noise = np.mean(noise**2)  # potència del soroll
+
+    if power_noise == 0:
+        return float("inf")  # sense soroll
+
+    snr_db = 10 * np.log10(power_signal / power_noise)
+    return snr_db
+
+    
 def _decode_bits_from_signal(rx_signal, bits_per_sample, mode=None):
     rx_bits_raw = binaritzar(rx_signal)
 
